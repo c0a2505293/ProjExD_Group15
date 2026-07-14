@@ -243,6 +243,45 @@ class Enemy(pg.sprite.Sprite):
         self.rect.move_ip(self.vx, self.vy)
 
 
+class Boss(Enemy):
+    """
+    ボスに関するクラス
+    """
+
+    def __init__(self):
+        super().__init__()
+        # ボス画像を読み込み、やや大きめに表示
+        try:
+            img = pg.transform.rotozoom(pg.image.load(f"fig/boss.png"), 0, 1.0)
+        except Exception:
+            img = pg.transform.rotozoom(random.choice(__class__.imgs), 0, 1.0)
+        self.image = img
+        self.rect = self.image.get_rect()
+        # 画面上部中央に出現
+        self.rect.center = (WIDTH // 2, 80)
+        self.vx = 6  # 横移動速度
+        self.vy = 0
+        self.state = "active"
+
+        # 体力
+        self.hp = 100
+
+        # 発射パターン管理（フレーム単位、50fps前提）
+        self.in_burst = True
+        self.shots_fired = 0
+        self.shot_frame_interval = 10  # 5発/秒 -> 0.2sごと -> 10フレーム
+        self.shot_frame_count = 0
+        self.pause_frames = 50  # 1秒間の待機 -> 50フレーム
+        self.pause_count = 0
+
+    def update(self):
+        # 左右に移動して画面端で反転
+        self.rect.move_ip(self.vx, 0)
+        if self.rect.left < 0 or self.rect.right > WIDTH:
+            self.vx = -self.vx
+            self.rect.move_ip(self.vx, 0)
+
+
 class Life:
     def __init__(self, num):
         self.num = num
@@ -284,7 +323,9 @@ class EMP:
     電磁パルス（EMP）に関するクラス
     """
 
-    def __init__(self, emys: pg.sprite.Group, bombs: pg.sprite.Group, screen: pg.Surface):
+    def __init__(
+        self, emys: pg.sprite.Group, bombs: pg.sprite.Group, screen: pg.Surface, exps: pg.sprite.Group, score: "Score"
+    ):
         emp_surf = pg.Surface((WIDTH, HEIGHT))  # 画面を黄色に
         emp_surf.set_alpha(128)  # 半透明に
         emp_surf.fill((255, 255, 0))
@@ -293,14 +334,25 @@ class EMP:
         time.sleep(0.05)
 
         # 敵機の無効化
-        for emy in emys:
+        for emy in list(emys):
             emy.interval = float("inf")  # 爆弾投下できない
             try:
                 emy.image = pg.transform.laplacian(emy.image)
             except:
                 pass
+            # ボスがいればダメージを与える
+            try:
+                from types import SimpleNamespace
+            except:
+                pass
+            if isinstance(emy, Boss):
+                emy.hp -= 10
+                if emy.hp <= 0:
+                    exps.add(Explosion(emy, 100))
+                    score.value += 10
+                    emy.kill()
 
-        for bomb in bombs:  # 爆弾無効か
+        for bomb in bombs:  # 爆弾無効化
             bomb.speed *= 0.5
             bomb.state = "inactive"
 
@@ -338,6 +390,7 @@ def main():
     exps = pg.sprite.Group()
     emys = pg.sprite.Group()
     gravities = pg.sprite.Group()
+    enemy_kill_count = 0
 
     tmr = 0
     clock = pg.time.Clock()
@@ -352,7 +405,7 @@ def main():
             if event.type == pg.KEYDOWN and event.key == pg.K_e:
                 if score.value >= 20:
                     score.value -= 20
-                    EMP(emys, bombs, screen)
+                    EMP(emys, bombs, screen, exps, score)
             if event.type == pg.KEYDOWN and event.key == pg.K_RETURN and score.value >= 200:
                 score.value -= 200
                 gravities.add(Gravity(400))
@@ -361,15 +414,54 @@ def main():
         if tmr % 200 == 0:  # 200フレームに1回，敵機を出現させる
             emys.add(Enemy())
 
+        # ボス出現判定: エイリアンを5体倒すと出現
+        if enemy_kill_count >= 5 and not any(isinstance(e, Boss) for e in emys):
+            emys.add(Boss())
+            enemy_kill_count = 0
+
         for emy in emys:
             if emy.state == "stop" and tmr % emy.interval == 0:
                 # 敵機が停止状態に入ったら，intervalに応じて爆弾投下
                 bombs.add(Bomb(emy, bird))
 
-        for emy in pg.sprite.groupcollide(emys, beams, True, True).keys():  # ビームと衝突した敵機リスト
-            exps.add(Explosion(emy, 100))  # 爆発エフェクト
-            score.value += 10  # 10点アップ
-            bird.change_img(6, screen)  # こうかとん喜びエフェクト
+        # ボスの移動と攻撃
+        for obj in list(emys):
+            if isinstance(obj, Boss):
+                boss = obj
+                if boss.in_burst:
+                    boss.shot_frame_count += 1
+                    if boss.shot_frame_count >= boss.shot_frame_interval:
+                        boss.shot_frame_count = 0
+                        if boss.shots_fired < 5:
+                            bombs.add(Bomb(boss, bird))
+                            boss.shots_fired += 1
+                        if boss.shots_fired >= 5:
+                            boss.in_burst = False
+                            boss.pause_count = boss.pause_frames
+                else:
+                    boss.pause_count -= 1
+                    if boss.pause_count <= 0:
+                        boss.in_burst = True
+                        boss.shots_fired = 0
+                        boss.shot_frame_count = 0
+
+        # ボスへのビーム処理
+        collisions = pg.sprite.groupcollide(emys, beams, False, True)
+        for emy, hit_beams in collisions.items():
+            if isinstance(emy, Boss):
+                # ビーム1本につき1ダメージ
+                emy.hp -= len(hit_beams) * 1
+                if emy.hp <= 0:
+                    exps.add(Explosion(emy, 100))
+                    score.value += 10
+                    bird.change_img(6, screen)
+                    emy.kill()
+            else:
+                exps.add(Explosion(emy, 100))  # 爆発エフェクト
+                score.value += 10  # 10点アップ
+                bird.change_img(6, screen)  # こうかとん喜びエフェクト
+                emy.kill()
+                enemy_kill_count += 1
 
         for bomb in pg.sprite.groupcollide(bombs, beams, True, True).keys():  # ビームと衝突した爆弾リスト
 
@@ -377,9 +469,20 @@ def main():
             score.value += 1  # 1点アップ
 
         # ★追加④ 重力場で敵を破壊
-        for emy in pg.sprite.groupcollide(emys, gravities, True, False).keys():
-            exps.add(Explosion(emy, 100))
-            score.value += 10
+        # 重力場と衝突した敵: 通常は即死だが、ボスは20ダメージ
+        grav_coll = pg.sprite.groupcollide(emys, gravities, False, False)
+        for emy in grav_coll.keys():
+            if isinstance(emy, Boss):
+                emy.hp -= 20
+                if emy.hp <= 0:
+                    exps.add(Explosion(emy, 100))
+                    score.value += 10
+                    emy.kill()
+            else:
+                exps.add(Explosion(emy, 100))
+                score.value += 10
+                emy.kill()
+                enemy_kill_count += 1
 
         # ★追加⑤ 重力場で爆弾を破壊
         for bomb in pg.sprite.groupcollide(bombs, gravities, True, False).keys():
