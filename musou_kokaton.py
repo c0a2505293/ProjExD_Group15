@@ -255,8 +255,7 @@ class Enemy(pg.sprite.Sprite):
         else:
             # 停止状態では縦移動なし（横移動もしない）
             pass
-
-
+        
 
 class Boss(Enemy):
     """
